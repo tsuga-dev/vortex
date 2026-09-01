@@ -1,0 +1,19 @@
+vortex-layout/src/layouts/dict/writer.rs
+  s_a3e5abec39ab4c::t_caa4de9823d958 27,99-111,192-200,328-378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "acf0a1c0e9c9f2d770d1eb6e81c0d8a6b41f8d39",
+  "prompts": {},
+  "sessions": {
+    "s_a3e5abec39ab4c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dccb18cb-e247-4fd1-9202-0bd2bbcd0fc6",
+        "model": "claude-opus-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
