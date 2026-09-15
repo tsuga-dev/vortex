@@ -126,7 +126,7 @@ impl VTable for Dict {
 }
 
 impl Layout<Dict> {
-    pub(crate) fn new(values: LayoutRef, codes: LayoutRef) -> Self {
+    pub fn new(values: LayoutRef, codes: LayoutRef) -> Self {
         Self::new_with_all_values_referenced(values, codes, false)
     }
 
