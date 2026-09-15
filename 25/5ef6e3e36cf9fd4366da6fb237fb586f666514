@@ -1,0 +1,19 @@
+vortex-layout/src/layouts/dict/mod.rs
+  s_ea126cfd1feb99::t_f51af2e06e8ad0 129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "255ef6e3e36cf9fd4366da6fb237fb586f666514",
+  "prompts": {},
+  "sessions": {
+    "s_ea126cfd1feb99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3e704a15-f49e-4ffb-93a6-1724a142e61a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
