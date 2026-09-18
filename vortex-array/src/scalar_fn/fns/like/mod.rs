@@ -674,12 +674,17 @@ mod tests {
         let mut ctx = array_session().create_execution_ctx();
         let array = VarBinViewArray::from_iter_bin([b"abc".as_slice()]).into_array();
         // Case folding is only well-defined over text, so ILIKE over Binary must be rejected.
-        let built = Like.try_new_array(
-            1,
-            LikeOptions { negated: false, case_insensitive: true },
-            [array, ConstantArray::new("a%c", 1).into_array()],
+        let built = Like::try_new(
+            array,
+            ConstantArray::new("a%c", 1).into_array(),
+            LikeOptions {
+                negated: false,
+                case_insensitive: true,
+            },
         );
-        let rejected = built.map_or(true, |e| e.execute::<BoolArray>(&mut ctx).is_err());
+        let rejected = built.map_or(true, |e| {
+            e.into_array().execute::<BoolArray>(&mut ctx).is_err()
+        });
         assert!(rejected, "ILIKE over Binary must be rejected");
     }
 
