@@ -1,0 +1,19 @@
+vortex-array/src/scalar_fn/fns/like/mod.rs
+  s_6d82cc94bd80e9::t_d87696ab70c07c 73-74,148-154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "be5ca8971d65d2e297ca1731f7d5f24c152db2e1",
+  "prompts": {},
+  "sessions": {
+    "s_6d82cc94bd80e9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "021edcb2-2e51-4b80-8b94-41bf7668a582",
+        "model": "claude-opus-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
