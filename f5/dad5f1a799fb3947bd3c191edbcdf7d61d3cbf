@@ -1,0 +1,19 @@
+vortex-array/src/stats/rewrite/builtins.rs
+  s_6d82cc94bd80e9::t_7c09e87d5ad900 348-354,794,1086-1094
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f5dad5f1a799fb3947bd3c191edbcdf7d61d3cbf",
+  "prompts": {},
+  "sessions": {
+    "s_6d82cc94bd80e9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "021edcb2-2e51-4b80-8b94-41bf7668a582",
+        "model": "claude-opus-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
