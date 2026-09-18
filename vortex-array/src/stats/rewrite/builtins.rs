@@ -345,6 +345,13 @@ impl StatsRewriteRule for LikeStatsRewrite {
             return Ok(None);
         }
 
+        // LIKE also accepts Binary input, but the falsifier compares the source's min/max
+        // against the Utf8 pattern literal, and those dtypes do not compare. Binary input
+        // therefore prunes nothing rather than coercing the literal.
+        if !expr.child(0).dtype().is_utf8() {
+            return Ok(None);
+        }
+
         let Some(pattern) = expr.child(1).as_opt::<Literal>() else {
             return Ok(None);
         };
@@ -784,6 +791,7 @@ mod tests {
                 ("f", DType::Primitive(PType::F32, Nullability::NonNullable)),
                 ("s", DType::Utf8(Nullability::NonNullable)),
                 ("t", DType::Utf8(Nullability::NonNullable)),
+                ("bin", DType::Binary(Nullability::NonNullable)),
                 ("n", nested_struct_dtype()),
             ]),
             Nullability::NonNullable,
@@ -1072,6 +1080,15 @@ mod tests {
 
         let expr = like(col("s"), lit("%suffix"));
         assert_rewrite_eq!(falsify(&expr)?, None);
+        Ok(())
+    }
+
+    /// Binary haystacks match byte-wise while the pattern stays Utf8, so the min/max
+    /// comparisons the falsifier would build have mismatched dtypes.
+    #[test]
+    fn skips_like_falsifier_for_binary_input() -> VortexResult<()> {
+        assert_rewrite_eq!(falsify(&like(col("bin"), lit("prefix%")))?, None);
+        assert_rewrite_eq!(falsify(&like(col("bin"), lit("exact")))?, None);
         Ok(())
     }
 
