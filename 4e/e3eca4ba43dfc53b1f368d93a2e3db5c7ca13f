@@ -1,0 +1,23 @@
+vortex-layout/src/layouts/repartition.rs
+  s_aeed8d44965d30::t_4116adc6999e11 101,133-136,167,176
+vortex-layout/src/layouts/buffered.rs
+  s_aeed8d44965d30::t_c0cf95e9df663b 45,52-55,69-71,73-77,81-82,85-91
+vortex-file/src/tests.rs
+  s_aeed8d44965d30::t_53aedd986a0776 1596-1599,1640-1641,1688-1689
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4ee3eca4ba43dfc53b1f368d93a2e3db5c7ca13f",
+  "prompts": {},
+  "sessions": {
+    "s_aeed8d44965d30": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e323d856-c004-49cb-9b9e-44c77145c162",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
