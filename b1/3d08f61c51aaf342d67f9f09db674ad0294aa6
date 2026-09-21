@@ -1,0 +1,19 @@
+vortex-layout/src/layouts/chunked/writer.rs
+  s_aeed8d44965d30::t_483dbdbd60b96c 31-34,41,44-50,99-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b13d08f61c51aaf342d67f9f09db674ad0294aa6",
+  "prompts": {},
+  "sessions": {
+    "s_aeed8d44965d30": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e323d856-c004-49cb-9b9e-44c77145c162",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
