@@ -1,0 +1,21 @@
+vortex-array/benches/dict_compare.rs
+  s_96f1f897bc657a::t_85a52f3d42d3ce 8,15-16,170-209
+vortex-array/src/arrays/dict/compute/compare.rs
+  s_96f1f897bc657a::t_40944098edf923 13,15,19,38-57,61,75-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "920dcdb6822ac100c859d2788b20d6a3d557e0f5",
+  "prompts": {},
+  "sessions": {
+    "s_96f1f897bc657a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "538672d8-0959-41eb-8216-e657fe5d2409",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
