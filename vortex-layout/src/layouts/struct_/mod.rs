@@ -6,6 +6,7 @@ pub mod writer;
 
 use std::sync::Arc;
 
+use reader::StructData;
 use reader::StructReader;
 use vortex_array::EmptyMetadata;
 use vortex_array::dtype::DType;
@@ -46,7 +47,7 @@ pub use Struct as StructLayoutEncoding;
 pub type StructLayout = Layout<Struct>;
 
 impl VTable for Struct {
-    type LayoutData = ();
+    type LayoutData = StructData;
     type Metadata = EmptyMetadata;
 
     fn id(&self) -> LayoutId {
@@ -73,7 +74,7 @@ impl VTable for Struct {
                 "Struct child {idx} row count does not match parent"
             );
         }
-        Ok(())
+        Ok(StructData::default())
     }
 
     fn nslots(layout: &Layout<Self>) -> usize {
@@ -135,7 +136,7 @@ impl Layout<Struct> {
             row_count,
             Vec::new(),
             OwnedLayoutChildren::layout_children(children),
-            (),
+            StructData::default(),
         )
         .into_typed()
     }

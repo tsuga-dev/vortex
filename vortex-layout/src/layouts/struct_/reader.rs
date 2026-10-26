@@ -51,7 +51,6 @@ use vortex_expr::transform::partition_bound;
 use vortex_mask::Mask;
 use vortex_session::VortexSession;
 use vortex_utils::aliases::dash_map::DashMap;
-use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::ArrayFuture;
 use crate::LayoutReader;
@@ -98,30 +97,48 @@ pub struct StructReader {
     /// for every f in fields.
     expanded_root_expr: BoundExpression,
 
-    field_lookup: Option<HashMap<FieldName, usize>>,
     partitioned_expr_cache: DashMap<ExactBoundExpr, Arc<OnceLock<Partitioned>>>,
 }
 
-impl StructReader {
-    pub(super) fn try_new(
-        layout: StructLayout,
-        name: Arc<str>,
-        segment_source: Arc<dyn SegmentSource>,
-        session: VortexSession,
-        ctx: crate::LayoutReaderContext,
-    ) -> VortexResult<Self> {
+/// Reader state that depends only on the struct dtype. It is kept on the layout, so every reader of
+/// one layout shares it instead of rebuilding it for each column.
+#[derive(Default)]
+pub struct StructData {
+    fields: OnceLock<Arc<FieldState>>,
+}
+
+struct FieldState {
+    dtypes: Arc<[DType]>,
+    names: Arc<[Arc<str>]>,
+    expanded_root_expr: BoundExpression,
+}
+
+impl StructData {
+    fn fields(&self, layout: &StructLayout) -> VortexResult<&Arc<FieldState>> {
+        if let Some(fields) = self.fields.get() {
+            return Ok(fields);
+        }
+        let fields = Arc::new(FieldState::try_new(layout)?);
+        Ok(self.fields.get_or_init(|| fields))
+    }
+}
+
+/// Cloning resets the state, since a layout rebuilt from parts may carry a different dtype.
+impl Clone for StructData {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for StructData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructData").finish_non_exhaustive()
+    }
+}
+
+impl FieldState {
+    fn try_new(layout: &StructLayout) -> VortexResult<Self> {
         let struct_dt = layout.struct_fields();
-
-        // NOTE: This number is arbitrary and likely depends on the longest common prefix of field names
-        let field_lookup = (struct_dt.nfields() > 80).then(|| {
-            struct_dt
-                .names()
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.clone(), i))
-                .collect()
-        });
-
         let nullable = layout.dtype().is_nullable();
         let extra = nullable as usize;
 
@@ -134,17 +151,33 @@ impl StructReader {
         dtypes.extend(struct_dt.fields());
         names.extend(struct_dt.names().iter().map(|x| Arc::clone(x.inner())));
 
+        Ok(Self {
+            dtypes: dtypes.into(),
+            names: names.into(),
+            // Create an expanded root expression that contains all fields of the struct.
+            expanded_root_expr: expanded_struct_root(layout.dtype(), struct_dt)?,
+        })
+    }
+}
+
+impl StructReader {
+    pub(super) fn try_new(
+        layout: StructLayout,
+        name: Arc<str>,
+        segment_source: Arc<dyn SegmentSource>,
+        session: VortexSession,
+        ctx: crate::LayoutReaderContext,
+    ) -> VortexResult<Self> {
+        let fields = Arc::clone(layout.data().fields(&layout)?);
+
         let lazy_children = LazyReaderChildren::new(
             Arc::clone(layout.children()),
-            dtypes,
-            names,
+            Arc::clone(&fields.dtypes),
+            Arc::clone(&fields.names),
             Arc::clone(&segment_source),
             session.clone(),
             ctx,
         );
-
-        // Create an expanded root expression that contains all fields of the struct.
-        let expanded_root_expr = expanded_struct_root(layout.dtype(), struct_dt)?;
 
         // This is where we need to do some complex things with the scan in order to split it into
         // different scans for different fields.
@@ -152,9 +185,8 @@ impl StructReader {
             layout,
             name,
             session,
-            expanded_root_expr,
+            expanded_root_expr: fields.expanded_root_expr.clone(),
             lazy_children,
-            field_lookup,
             partitioned_expr_cache: DashMap::with_hasher_and_shard_amount(Default::default(), 8),
         })
     }
@@ -175,10 +207,8 @@ impl StructReader {
             Item::Field(name) => name,
         };
         let idx = self
-            .field_lookup
-            .as_ref()
-            .and_then(|lookup| lookup.get(name).copied())
-            .or_else(|| self.struct_fields().find(name))
+            .struct_fields()
+            .find(name)
             .ok_or_else(|| vortex_err!("Field {} not found in struct layout", name))?;
         self.field_reader_by_index(idx)
     }
@@ -362,7 +392,7 @@ impl StructReader {
                     .into_array(),
             )
         }
-        .boxed())
+           .boxed())
     }
 }
 
@@ -407,81 +437,81 @@ fn expand_struct_root(
     };
 
     Ok(expr
-        .transform_down(|node| {
-            if node.is_root() {
-                return Ok(Transformed {
-                    value: expanded_root.clone(),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                });
-            }
+       .transform_down(|node| {
+           if node.is_root() {
+               return Ok(Transformed {
+                   value: expanded_root.clone(),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               });
+           }
 
-            let Some(scalar_fn) = node.as_scalar() else {
-                return Ok(Transformed::no(node));
-            };
-            if !node
-                .children()
-                .first()
-                .is_some_and(BoundExpression::is_root)
-            {
-                return Ok(Transformed::no(node));
-            }
+           let Some(scalar_fn) = node.as_scalar() else {
+               return Ok(Transformed::no(node));
+           };
+           if !node
+               .children()
+               .first()
+               .is_some_and(BoundExpression::is_root)
+           {
+               return Ok(Transformed::no(node));
+           }
 
-            if let Some(field_name) = scalar_fn.as_opt::<GetItem>() {
-                let idx = fields.find(field_name).ok_or_else(|| {
-                    vortex_err!("Field {field_name} not found while expanding struct root")
-                })?;
-                let child = packed.children()[idx].clone();
-                return Ok(Transformed {
-                    value: with_validity(child),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                });
-            }
+           if let Some(field_name) = scalar_fn.as_opt::<GetItem>() {
+               let idx = fields.find(field_name).ok_or_else(|| {
+                   vortex_err!("Field {field_name} not found while expanding struct root")
+               })?;
+               let child = packed.children()[idx].clone();
+               return Ok(Transformed {
+                   value: with_validity(child),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               });
+           }
 
-            if let Some(selection) = scalar_fn.as_opt::<Select>() {
-                let names = selection.normalize_to_included_fields(fields.names())?;
-                let children: Vec<_> = names
-                    .iter()
-                    .map(|name| {
-                        let idx = fields.find(name).vortex_expect(
-                            "normalized selection fields must exist in the struct root",
-                        );
-                        packed.children()[idx].clone()
-                    })
-                    .collect();
-                return Ok(Transformed {
-                    value: with_validity(pack(
-                        names.into_iter().zip(children),
-                        Nullability::NonNullable,
-                    )),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                });
-            }
+           if let Some(selection) = scalar_fn.as_opt::<Select>() {
+               let names = selection.normalize_to_included_fields(fields.names())?;
+               let children: Vec<_> = names
+                   .iter()
+                   .map(|name| {
+                       let idx = fields.find(name).vortex_expect(
+                           "normalized selection fields must exist in the struct root",
+                       );
+                       packed.children()[idx].clone()
+                   })
+                   .collect();
+               return Ok(Transformed {
+                   value: with_validity(pack(
+                       names.into_iter().zip(children),
+                       Nullability::NonNullable,
+                   )),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               });
+           }
 
-            let Some(validity) = validity else {
-                return Ok(Transformed::no(node));
-            };
+           let Some(validity) = validity else {
+               return Ok(Transformed::no(node));
+           };
 
-            // You can alternatively call optimize_recursive but this is cheaper
-            if scalar_fn.is::<IsNotNull>() {
-                return Ok(Transformed {
-                    value: validity.clone(),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                });
-            }
-            if scalar_fn.is::<IsNull>() {
-                return Ok(Transformed {
-                    value: not(validity.clone()),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                });
-            }
-            Ok(Transformed::no(node))
-        })?
-        .into_inner())
+           // You can alternatively call optimize_recursive but this is cheaper
+           if scalar_fn.is::<IsNotNull>() {
+               return Ok(Transformed {
+                   value: validity.clone(),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               });
+           }
+           if scalar_fn.is::<IsNull>() {
+               return Ok(Transformed {
+                   value: not(validity.clone()),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               });
+           }
+           Ok(Transformed::no(node))
+       })?
+       .into_inner())
 }
 
 // Same as make_bound_free_field_annotator, but handles is_not_null($) as the
@@ -508,25 +538,25 @@ fn step_into_struct_field(
     field_dtype: DType,
 ) -> VortexResult<BoundExpression> {
     Ok(expr
-        .transform_down(|node| {
-            let is_field_access = node.as_scalar().is_some_and(|scalar_fn| match item {
-                Item::Field(field_name) => scalar_fn
-                    .as_opt::<GetItem>()
-                    .is_some_and(|name| name == field_name),
-                Item::Validity => scalar_fn.is::<IsNotNull>(),
-            }) && node.children()[0].is_root();
+       .transform_down(|node| {
+           let is_field_access = node.as_scalar().is_some_and(|scalar_fn| match item {
+               Item::Field(field_name) => scalar_fn
+                   .as_opt::<GetItem>()
+                   .is_some_and(|name| name == field_name),
+               Item::Validity => scalar_fn.is::<IsNotNull>(),
+           }) && node.children()[0].is_root();
 
-            if is_field_access {
-                Ok(Transformed {
-                    value: BoundExpression::new_root(field_dtype.clone()),
-                    changed: true,
-                    order: TraversalOrder::Skip,
-                })
-            } else {
-                Ok(Transformed::no(node))
-            }
-        })?
-        .into_inner())
+           if is_field_access {
+               Ok(Transformed {
+                   value: BoundExpression::new_root(field_dtype.clone()),
+                   changed: true,
+                   order: TraversalOrder::Skip,
+               })
+           } else {
+               Ok(Transformed::no(node))
+           }
+       })?
+       .into_inner())
 }
 
 /// When partitioning an expression, in the case it only has a single partition we can avoid
@@ -744,6 +774,7 @@ mod tests {
     use vortex_array::dtype::PType;
     use vortex_array::dtype::RESERVED_VALIDITY_FIELD_NAME;
     use vortex_array::dtype::StructFields;
+    use vortex_array::expr::ExactBoundExpr;
     use vortex_array::expr::Expression;
     use vortex_array::expr::and;
     use vortex_array::expr::col;
@@ -768,11 +799,13 @@ mod tests {
     use vortex_io::session::RuntimeSessionExt;
     use vortex_mask::Mask;
 
+    use super::StructReader;
     use crate::LayoutReaderRef;
     use crate::LayoutRef;
     use crate::LayoutStrategy;
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
+    use crate::layouts::struct_::Struct;
     use crate::layouts::table::TableStrategy;
     use crate::layouts::zoned::writer::ZonedLayoutOptions;
     use crate::layouts::zoned::writer::ZonedStrategy;
@@ -806,16 +839,16 @@ mod tests {
                         5,
                         Validity::NonNullable,
                     )
-                    .unwrap()
-                    .into_array()
-                    .to_array_stream()
-                    .sequenced(ptr),
+                        .unwrap()
+                        .into_array()
+                        .to_array_stream()
+                        .sequenced(ptr),
                     eof,
                     &session,
                 )
                 .await
         })
-        .unwrap();
+            .unwrap();
 
         (segments, layout)
     }
@@ -843,18 +876,18 @@ mod tests {
                             ("b", buffer![4, 5, 6].into_array()),
                             ("c", buffer![4, 5, 6].into_array()),
                         ]
-                        .as_slice(),
+                            .as_slice(),
                     )
-                    .unwrap()
-                    .into_array()
-                    .to_array_stream()
-                    .sequenced(ptr),
+                        .unwrap()
+                        .into_array()
+                        .to_array_stream()
+                        .sequenced(ptr),
                     eof,
                     &session,
                 )
                 .await
         })
-        .unwrap();
+            .unwrap();
 
         (segments, layout)
     }
@@ -885,16 +918,16 @@ mod tests {
                         ],
                         Validity::Array(BoolArray::from_iter([false, true, true]).into_array()),
                     )
-                    .unwrap()
-                    .into_array()
-                    .to_array_stream()
-                    .sequenced(ptr),
+                        .unwrap()
+                        .into_array()
+                        .to_array_stream()
+                        .sequenced(ptr),
                     eof,
                     &session,
                 )
                 .await
         })
-        .unwrap();
+            .unwrap();
 
         (segments, layout)
     }
@@ -932,30 +965,55 @@ mod tests {
                                         [("c", buffer![4, 5, 6].into_array())],
                                         Validity::NonNullable,
                                     )
-                                    .unwrap()
-                                    .into_array(),
+                                        .unwrap()
+                                        .into_array(),
                                 )],
                                 Validity::Array(
                                     BoolArray::from_iter([true, false, true]).into_array(),
                                 ),
                             )
-                            .unwrap()
-                            .into_array(),
+                                .unwrap()
+                                .into_array(),
                         )],
                         Validity::NonNullable,
                     )
-                    .unwrap()
-                    .into_array()
-                    .to_array_stream()
-                    .sequenced(ptr),
+                        .unwrap()
+                        .into_array()
+                        .to_array_stream()
+                        .sequenced(ptr),
                     eof,
                     &session,
                 )
                 .await
         })
-        .unwrap();
+            .unwrap();
 
         (segments, layout)
+    }
+
+    #[rstest]
+    fn test_readers_of_one_layout_share_field_state(
+        #[from(struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
+    ) {
+        let layout = layout.as_::<Struct>();
+        let reader = |name: &str| {
+            StructReader::try_new(
+                layout.clone(),
+                name.into(),
+                Arc::clone(&segments),
+                SESSION.clone(),
+                Default::default(),
+            )
+                .unwrap()
+        };
+        let first = reader("first");
+        let second = reader("second");
+
+        assert_eq!(
+            ExactBoundExpr(first.expanded_root_expr),
+            ExactBoundExpr(second.expanded_root_expr)
+        );
+        assert!(layout.data().clone().fields.get().is_none());
     }
 
     #[rstest]
@@ -969,14 +1027,14 @@ mod tests {
             eq(col("a"), lit(7)),
             or(eq(col("b"), lit(5)), eq(col("a"), lit(3))),
         )
-        .bind(reader.dtype())
-        .unwrap();
+            .bind(reader.dtype())
+            .unwrap();
         let result = block_on(|_| {
             reader
                 .filter_evaluation(&(0..3), &filt, MaskFuture::new_true(3))
                 .unwrap()
         })
-        .unwrap();
+            .unwrap();
         assert_eq!(result, Mask::from_iter([true, true, true]));
     }
 
@@ -996,7 +1054,7 @@ mod tests {
                 .projection_evaluation(&(0..3), &expr, MaskFuture::new_true(3))
                 .unwrap()
         })
-        .unwrap();
+            .unwrap();
         let expected = BoolArray::from_iter([true, false, false]);
         assert_arrays_eq!(result, expected, &mut ctx);
     }
@@ -1021,7 +1079,7 @@ mod tests {
                 )
                 .unwrap()
         })
-        .unwrap();
+            .unwrap();
 
         let expected = BoolArray::from_iter([true, false]);
         assert_arrays_eq!(result, expected, &mut ctx);
@@ -1039,8 +1097,8 @@ mod tests {
             [("a", get_item("a", root())), ("b", get_item("b", root()))],
             Nullability::NonNullable,
         )
-        .bind(reader.dtype())
-        .unwrap();
+            .bind(reader.dtype())
+            .unwrap();
         let result = block_on(|_| {
             reader
                 .projection_evaluation(
@@ -1051,7 +1109,7 @@ mod tests {
                 )
                 .unwrap()
         })
-        .unwrap();
+            .unwrap();
 
         assert_eq!(result.len(), 2);
 
@@ -1305,7 +1363,7 @@ mod tests {
                         Some(5),
                         Some(6),
                     ])
-                    .into_array(),
+                        .into_array(),
                 ),
                 ("d", buffer![10i32, 20, 30, 40, 50, 60].into_array()),
             ],
@@ -1348,7 +1406,7 @@ mod tests {
             ],
             validity,
         )?
-        .into_array())
+           .into_array())
     }
 
     fn nested_validity_reader(root_nullable: bool) -> VortexResult<LayoutReaderRef> {
@@ -1686,7 +1744,7 @@ mod tests {
                     .await
             }
         })
-        .unwrap();
+            .unwrap();
 
         // The result is a nullable struct (because root.a.b is nullable) with a non-nullable
         // field "c" (because the original field was non-nullable).
@@ -1755,7 +1813,7 @@ mod tests {
             5,
             Validity::AllValid,
         )
-        .unwrap();
+            .unwrap();
         assert_arrays_eq!(result, expected, &mut SESSION.create_execution_ctx());
     }
 
@@ -1784,18 +1842,18 @@ mod tests {
                             ("age", buffer![7u8, 2, 3].into_array()),
                             ("score", buffer![4u8, 5, 6].into_array()),
                         ]
-                        .as_slice(),
+                            .as_slice(),
                     )
-                    .unwrap()
-                    .into_array()
-                    .to_array_stream()
-                    .sequenced(ptr),
+                        .unwrap()
+                        .into_array()
+                        .to_array_stream()
+                        .sequenced(ptr),
                     eof,
                     &session,
                 )
                 .await
         })
-        .unwrap();
+            .unwrap();
 
         let reader = layout
             .new_reader("".into(), segments, &SESSION, &Default::default())
@@ -1837,19 +1895,19 @@ mod tests {
                             .into_array(),
                     ),
                 ]
-                .as_slice(),
+                    .as_slice(),
             )
-            .unwrap()
-            .into_array()
+                .unwrap()
+                .into_array()
         };
         let array_stream = ChunkedArray::from_iter([
             chunk([1, 1, 1], [1, 2, 3]),
             chunk([1, 2, 2], [4, 1, 2]),
             chunk([2, 2, 3], [3, 4, 1]),
         ])
-        .into_array()
-        .to_array_stream()
-        .sequenced(ptr);
+            .into_array()
+            .to_array_stream()
+            .sequenced(ptr);
         let segments2 = Arc::<TestSegments>::clone(&segments);
         let layout = block_on(|handle| async move {
             let session = new_session().with_handle(handle);
@@ -1857,7 +1915,7 @@ mod tests {
                 .write_stream(ctx.into(), segments2, array_stream, eof, &session)
                 .await
         })
-        .unwrap();
+            .unwrap();
         (segments, layout)
     }
 

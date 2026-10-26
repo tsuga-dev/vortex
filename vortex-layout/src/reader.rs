@@ -287,8 +287,8 @@ enum ChildMeta {
     Uniform { dtype: DType, name: Arc<str> },
     /// Distinct dtype and name per child.
     PerChild {
-        dtypes: Vec<DType>,
-        names: Vec<Arc<str>>,
+        dtypes: Arc<[DType]>,
+        names: Arc<[Arc<str>]>,
     },
 }
 
@@ -309,15 +309,18 @@ impl LazyReaderChildren {
     /// `dtypes` and `names` must be aligned with the child indices exposed by `children`.
     pub fn new(
         children: Arc<dyn LayoutChildren>,
-        dtypes: Vec<DType>,
-        names: Vec<Arc<str>>,
+        dtypes: impl Into<Arc<[DType]>>,
+        names: impl Into<Arc<[Arc<str>]>>,
         segment_source: Arc<dyn SegmentSource>,
         session: VortexSession,
         ctx: LayoutReaderContext,
     ) -> Self {
         Self::with_meta(
             children,
-            ChildMeta::PerChild { dtypes, names },
+            ChildMeta::PerChild {
+                dtypes: dtypes.into(),
+                names: names.into(),
+            },
             segment_source,
             session,
             ctx,
