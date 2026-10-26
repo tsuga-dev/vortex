@@ -5,9 +5,13 @@ use std::env;
 use std::sync::LazyLock;
 
 use flatbuffers::FlatBufferBuilder;
+use flatbuffers::ForwardsUOffset;
+use flatbuffers::InvalidFlatbuffer;
+use flatbuffers::Vector;
+use flatbuffers::Verifiable;
+use flatbuffers::Verifier;
 use flatbuffers::VerifierOptions;
 use flatbuffers::WIPOffset;
-use flatbuffers::root_with_opts;
 use vortex_array::dtype::DType;
 use vortex_array::flatbuffers::FlatBuffer;
 use vortex_array::flatbuffers::FlatBufferRoot;
@@ -27,7 +31,7 @@ use crate::layouts::foreign::new_foreign_layout;
 use crate::segments::SegmentId;
 use crate::session::LayoutSessionExt;
 
-static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
+pub(crate) static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
     VerifierOptions {
         // Overridden
         max_tables: env::var("VORTEX_MAX_LAYOUT_TABLES")
@@ -43,6 +47,61 @@ static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
         ignore_missing_null_terminator: false,
     }
 });
+
+/// Verifies one layout table: its own fields, and the `encoding` and `row_count` of each direct
+/// child, which a parent reads without building the child. The remaining fields of a child are
+/// verified when that child is built, so only the parts of the tree a reader touches are verified.
+struct LayoutNode;
+
+impl Verifiable for LayoutNode {
+    fn run_verifier(v: &mut Verifier, pos: usize) -> Result<(), InvalidFlatbuffer> {
+        v.visit_table(pos)?
+            .visit_field::<u16>("encoding", layout::Layout::VT_ENCODING, false)?
+            .visit_field::<u64>("row_count", layout::Layout::VT_ROW_COUNT, false)?
+            .visit_field::<ForwardsUOffset<Vector<'_, u8>>>(
+                "metadata",
+                layout::Layout::VT_METADATA,
+                false,
+            )?
+            .visit_field::<ForwardsUOffset<Vector<'_, ForwardsUOffset<LayoutHeader>>>>(
+                "children",
+                layout::Layout::VT_CHILDREN,
+                false,
+            )?
+            .visit_field::<ForwardsUOffset<Vector<'_, u32>>>(
+                "segments",
+                layout::Layout::VT_SEGMENTS,
+                false,
+            )?
+            .finish();
+        Ok(())
+    }
+}
+
+/// The fields of a child layout that its parent reads without building it.
+struct LayoutHeader;
+
+impl Verifiable for LayoutHeader {
+    fn run_verifier(v: &mut Verifier, pos: usize) -> Result<(), InvalidFlatbuffer> {
+        v.visit_table(pos)?
+            .visit_field::<u16>("encoding", layout::Layout::VT_ENCODING, false)?
+            .visit_field::<u64>("row_count", layout::Layout::VT_ROW_COUNT, false)?
+            .finish();
+        Ok(())
+    }
+}
+
+/// Verifies the layout table at `loc`, as described on [`LayoutNode`].
+pub(crate) fn verify_layout_node(flatbuffer: &[u8], loc: usize) -> VortexResult<()> {
+    LayoutNode::run_verifier(&mut Verifier::new(&LAYOUT_VERIFIER, flatbuffer), loc)?;
+    Ok(())
+}
+
+/// Verifies the layout table at `loc` and every layout below it.
+pub(crate) fn verify_layout_tree(flatbuffer: &[u8], loc: usize) -> VortexResult<()> {
+    layout::Layout::run_verifier(&mut Verifier::new(&LAYOUT_VERIFIER, flatbuffer), loc)?;
+    Ok(())
+}
 
 /// Parse a [`LayoutRef`] from a layout flatbuffer.
 pub fn layout_from_flatbuffer(
@@ -66,19 +125,26 @@ pub fn layout_from_flatbuffer_with_options(
 ) -> VortexResult<LayoutRef> {
     let layout_session = session.layouts();
     let layouts = layout_session.registry();
-    let fb_layout = root_with_opts::<layout::Layout>(&LAYOUT_VERIFIER, &flatbuffer)?;
+    ForwardsUOffset::<LayoutNode>::run_verifier(
+        &mut Verifier::new(&LAYOUT_VERIFIER, &flatbuffer),
+        0,
+    )?;
+    // SAFETY: the root offset and the root table were verified above.
+    let fb_layout = unsafe { flatbuffers::root_unchecked::<layout::Layout>(&flatbuffer) };
     let encoding_id = layout_ctx
         .resolve(fb_layout.encoding())
         .ok_or_else(|| vortex_err!("Invalid encoding ID: {}", fb_layout.encoding()))?;
     let encoding = layouts.get(&encoding_id);
 
     if encoding.is_none() && allow_unknown {
+        // A foreign layout is built eagerly from the whole subtree.
+        verify_layout_tree(&flatbuffer, fb_layout._tab.loc())?;
         return foreign_layout_from_fb(fb_layout, dtype, layout_ctx);
     }
     let encoding =
         encoding.ok_or_else(|| vortex_err!("Invalid encoding ID: {}", fb_layout.encoding()))?;
 
-    // SAFETY: we validate the flatbuffer above in the `root` call, and extract a loc.
+    // SAFETY: the root table was verified with `LayoutNode` above.
     let viewed_children = unsafe {
         ViewedLayoutChildren::new_unchecked(
             flatbuffer.clone(),
@@ -228,16 +294,130 @@ mod tests {
     use flatbuffers::FlatBufferBuilder;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
+    use vortex_array::dtype::PType;
+    use vortex_array::dtype::StructFields;
     use vortex_session::VortexSession;
     use vortex_session::registry::ReadContext;
 
+    use super::LAYOUT_VERIFIER;
     use super::layout_from_flatbuffer_with_options;
+    use super::verify_layout_tree;
     use crate::LayoutEncodingId;
     use crate::flatbuffers::layout as fbl;
     use crate::session::LayoutSession;
 
     static SESSION: LazyLock<VortexSession> =
         LazyLock::new(|| VortexSession::empty().with::<LayoutSession>());
+
+    fn finish(
+        mut fbb: FlatBufferBuilder<'_>,
+        root: flatbuffers::WIPOffset<fbl::Layout<'_>>,
+    ) -> Vec<u8> {
+        fbb.finish_minimal(root);
+        let (buf, start) = fbb.collapse();
+        buf[start..].to_vec()
+    }
+
+    fn aligned(bytes: Vec<u8>) -> vortex_array::flatbuffers::FlatBuffer {
+        vortex_array::flatbuffers::FlatBuffer::align_from(vortex_buffer::ByteBuffer::from(bytes))
+    }
+
+    /// A child whose metadata vector is corrupt fails when it is built, not when its parent is.
+    #[expect(clippy::disallowed_methods, reason = "test-only id")]
+    #[test]
+    fn corrupt_child_fails_only_when_built() {
+        const MARKER: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x12];
+        let mut fbb = FlatBufferBuilder::new();
+        let children = [vec![1u8], MARKER.to_vec()].map(|metadata| {
+            let metadata = fbb.create_vector(&metadata);
+            fbl::Layout::create(
+                &mut fbb,
+                &fbl::LayoutArgs {
+                    encoding: 1,
+                    row_count: 3,
+                    metadata: Some(metadata),
+                    children: None,
+                    segments: None,
+                },
+            )
+        });
+        let children = fbb.create_vector(&children);
+        let root = fbl::Layout::create(
+            &mut fbb,
+            &fbl::LayoutArgs {
+                encoding: 0,
+                row_count: 3,
+                metadata: None,
+                children: Some(children),
+                segments: None,
+            },
+        );
+        let mut bytes = finish(fbb, root);
+        let marker = bytes
+            .windows(MARKER.len())
+            .position(|window| window == MARKER)
+            .unwrap();
+        bytes[marker - 4..marker].copy_from_slice(&u32::MAX.to_le_bytes());
+        let root_loc = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(verify_layout_tree(&bytes, root_loc).is_err());
+
+        let i32 = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let dtype = DType::Struct(
+            StructFields::from_iter([("a", i32.clone()), ("b", i32)]),
+            Nullability::NonNullable,
+        );
+        let layout_ctx = ReadContext::new([
+            LayoutEncodingId::new("vortex.struct"),
+            LayoutEncodingId::new("vortex.test.foreign_child_layout"),
+        ]);
+
+        let layout = layout_from_flatbuffer_with_options(
+            aligned(bytes),
+            &dtype,
+            &layout_ctx,
+            &ReadContext::new([]),
+            &SESSION,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(layout.slot(1).unwrap().unwrap().metadata(), vec![1]);
+        assert!(layout.slot(2).is_err());
+    }
+
+    /// Nesting beyond the verifier's depth limit is rejected when the too-deep layout is built.
+    #[expect(clippy::disallowed_methods, reason = "test-only id")]
+    #[test]
+    fn layout_deeper_than_limit_fails_when_built() {
+        let mut fbb = FlatBufferBuilder::new();
+        let mut layout = fbl::Layout::create(&mut fbb, &fbl::LayoutArgs::default());
+        for _ in 0..LAYOUT_VERIFIER.max_depth {
+            let children = fbb.create_vector(&[layout]);
+            layout = fbl::Layout::create(
+                &mut fbb,
+                &fbl::LayoutArgs {
+                    children: Some(children),
+                    ..Default::default()
+                },
+            );
+        }
+        let bytes = finish(fbb, layout);
+
+        let mut layout = layout_from_flatbuffer_with_options(
+            aligned(bytes),
+            &DType::Primitive(PType::I32, Nullability::NonNullable),
+            &ReadContext::new([LayoutEncodingId::new("vortex.chunked")]),
+            &ReadContext::new([]),
+            &SESSION,
+            false,
+        )
+        .unwrap();
+        for _ in 1..LAYOUT_VERIFIER.max_depth {
+            layout = layout.slot(0).unwrap().unwrap();
+        }
+        let err = layout.slot(0).unwrap_err();
+        assert!(err.to_string().contains("nested deeper"), "{err}");
+    }
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
     #[test]

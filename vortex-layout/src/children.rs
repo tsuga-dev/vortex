@@ -21,6 +21,9 @@ use crate::LayoutRef;
 use crate::flatbuffers::layout as fbl;
 use crate::layouts::foreign::new_foreign_layout;
 use crate::segments::SegmentId;
+use crate::serde::LAYOUT_VERIFIER;
+use crate::serde::verify_layout_node;
+use crate::serde::verify_layout_tree;
 use crate::session::LayoutRegistry;
 
 /// Abstract way of accessing the children of a layout.
@@ -131,6 +134,8 @@ pub(crate) struct ViewedLayoutChildren {
     layouts: LayoutRegistry,
     allow_unknown: bool,
     session: VortexSession,
+    /// Number of layouts from the root down to this one, bounded by the verifier's `max_depth`.
+    depth: usize,
     cache: Arc<[OnceCell<LayoutRef>]>,
     /// Per-child answers to [`LayoutChildren::child_is_indivisible`], precomputed at
     /// construction from the flatbuffer encoding tags alone.
@@ -142,7 +147,7 @@ impl ViewedLayoutChildren {
     ///
     /// # Safety
     ///
-    /// Assumes the flatbuffer is validated and that the `flatbuffer_loc` is the correct offset
+    /// The layout table at `flatbuffer_loc` must have been verified with [`verify_layout_node`].
     pub(super) unsafe fn new_unchecked(
         flatbuffer: FlatBuffer,
         flatbuffer_loc: usize,
@@ -178,16 +183,22 @@ impl ViewedLayoutChildren {
             layouts,
             allow_unknown,
             session,
+            depth: 1,
             cache,
             indivisible,
         }
     }
 
+    fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
+
     /// Return the flatbuffer layout message.
     fn flatbuffer(&self) -> fbl::Layout<'_> {
-        // SAFETY: flatbuffer_loc is guaranteed to be a valid offset into the flatbuffer
-        // as it was constructed from a validated flatbuffer in ViewedLayoutChildren::try_new.
-        // The lifetime of the returned Layout is tied to self, ensuring the buffer remains valid.
+        // SAFETY: the table at flatbuffer_loc was verified before construction (see
+        // `new_unchecked`). The lifetime of the returned Layout is tied to self, ensuring the
+        // buffer remains valid.
         unsafe { fbl::Layout::follow(self.flatbuffer.as_ref(), self.flatbuffer_loc) }
     }
 
@@ -238,10 +249,14 @@ impl LayoutChildren for ViewedLayoutChildren {
         }
 
         let layout_ref = self.cache[idx].get_or_try_init(|| {
+            let depth = self.depth + 1;
+            if depth > LAYOUT_VERIFIER.max_depth {
+                vortex_bail!("Layout is nested deeper than {}", LAYOUT_VERIFIER.max_depth);
+            }
             let fb_child = self.flatbuffer().children().unwrap_or_default().get(idx);
+            verify_layout_node(self.flatbuffer.as_ref(), fb_child._tab.loc())?;
 
-            // SAFETY: same validated flatbuffer; fb_child._tab.loc() is a valid offset
-            // We need this to avoid re-initializing cache here
+            // SAFETY: the child table was verified just above.
             let viewed_children = unsafe {
                 ViewedLayoutChildren::new_unchecked(
                     self.flatbuffer.clone(),
@@ -252,7 +267,8 @@ impl LayoutChildren for ViewedLayoutChildren {
                     self.allow_unknown,
                     self.session.clone(),
                 )
-            };
+            }
+            .with_depth(depth);
 
             let encoding_id = self
                 .layout_read_ctx
@@ -262,6 +278,8 @@ impl LayoutChildren for ViewedLayoutChildren {
                 })?;
             let Some(encoding) = self.layouts.get(&encoding_id) else {
                 if self.allow_unknown {
+                    // A foreign layout is built eagerly from the whole subtree.
+                    verify_layout_tree(self.flatbuffer.as_ref(), fb_child._tab.loc())?;
                     return viewed_children.foreign_layout_from_fb(fb_child, dtype);
                 }
                 vortex_bail!("Unknown layout encoding: {encoding_id}");
