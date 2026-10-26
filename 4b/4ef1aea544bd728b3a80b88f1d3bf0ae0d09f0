@@ -1,0 +1,19 @@
+vortex-layout/src/layouts/struct_/reader.rs
+  s_715f9fc7f5995f::t_1e14461d7a76ca 818-819
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b4ef1aea544bd728b3a80b88f1d3bf0ae0d09f0",
+  "prompts": {},
+  "sessions": {
+    "s_715f9fc7f5995f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f324fa5b-059c-444e-9b34-bc98fb381bb9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
