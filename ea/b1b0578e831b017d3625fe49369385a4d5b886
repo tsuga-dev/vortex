@@ -1,0 +1,30 @@
+vortex-layout/src/layouts/struct_/reader.rs
+  s_715f9fc7f5995f::t_681948680a748c 800-817,820-823
+  s_715f9fc7f5995f::t_59c685e3f7ea65 609-611
+  s_715f9fc7f5995f::t_54233086e78348 166-167
+  s_715f9fc7f5995f::t_3b80658a044213 67-95,97-101,103-105,118-136,139-140,152
+  s_715f9fc7f5995f::t_0055525da841c8 615,799
+  s_715f9fc7f5995f::t_1e14461d7a76ca 818-819
+vortex-layout/src/layouts/chunked/reader.rs
+  s_715f9fc7f5995f::t_5c8f018dd37deb 76
+vortex-layout/src/layouts/struct_/mod.rs
+  s_715f9fc7f5995f::t_b4bd33d8e08878 9,50,76,138
+vortex-layout/src/reader.rs
+  s_715f9fc7f5995f::t_563b91eba34e70 290-291,312-313,320-323
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eab1b0578e831b017d3625fe49369385a4d5b886",
+  "prompts": {},
+  "sessions": {
+    "s_715f9fc7f5995f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f324fa5b-059c-444e-9b34-bc98fb381bb9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
