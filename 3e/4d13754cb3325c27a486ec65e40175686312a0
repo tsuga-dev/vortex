@@ -1,0 +1,21 @@
+vortex-layout/src/children.rs
+  s_715f9fc7f5995f::t_792e270281eaa3 22-24,137-138,150,186,192-196,199-201,252-255,257,259,270-271,281-282
+vortex-layout/src/flatbuffers.rs
+  s_715f9fc7f5995f::t_00e661c5a26904 8-12,34,51-105,128-133,140-141,147,299-301,303,307-418
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3e4d13754cb3325c27a486ec65e40175686312a0",
+  "prompts": {},
+  "sessions": {
+    "s_715f9fc7f5995f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f324fa5b-059c-444e-9b34-bc98fb381bb9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "halvorboe <halvor@tsuga.com>"
+    }
+  }
+}
