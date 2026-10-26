@@ -40,7 +40,6 @@ use vortex_error::vortex_err;
 use vortex_mask::Mask;
 use vortex_session::VortexSession;
 use vortex_utils::aliases::dash_map::DashMap;
-use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::ArrayFuture;
 use crate::LayoutReader;
@@ -62,30 +61,48 @@ pub struct StructReader {
     /// ensures we can correctly partition expressions over the fields of the struct.
     expanded_root_expr: BoundExpression,
 
-    field_lookup: Option<HashMap<FieldName, usize>>,
     partitioned_expr_cache: DashMap<ExactBoundExpr, Arc<OnceLock<Partitioned>>>,
 }
 
-impl StructReader {
-    pub(super) fn try_new(
-        layout: StructLayout,
-        name: Arc<str>,
-        segment_source: Arc<dyn SegmentSource>,
-        session: VortexSession,
-        ctx: crate::LayoutReaderContext,
-    ) -> VortexResult<Self> {
+/// Reader state that depends only on the struct dtype. It is kept on the layout, so every reader of
+/// one layout shares it instead of rebuilding it for each column.
+#[derive(Default)]
+pub struct StructData {
+    fields: OnceLock<Arc<FieldState>>,
+}
+
+struct FieldState {
+    dtypes: Arc<[DType]>,
+    names: Arc<[Arc<str>]>,
+    expanded_root_expr: BoundExpression,
+}
+
+impl StructData {
+    fn fields(&self, layout: &StructLayout) -> VortexResult<&Arc<FieldState>> {
+        if let Some(fields) = self.fields.get() {
+            return Ok(fields);
+        }
+        let fields = Arc::new(FieldState::try_new(layout)?);
+        Ok(self.fields.get_or_init(|| fields))
+    }
+}
+
+/// Cloning resets the state, since a layout rebuilt from parts may carry a different dtype.
+impl Clone for StructData {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for StructData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructData").finish_non_exhaustive()
+    }
+}
+
+impl FieldState {
+    fn try_new(layout: &StructLayout) -> VortexResult<Self> {
         let struct_dt = layout.struct_fields();
-
-        // NOTE: This number is arbitrary and likely depends on the longest common prefix of field names
-        let field_lookup = (struct_dt.nfields() > 80).then(|| {
-            struct_dt
-                .names()
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.clone(), i))
-                .collect()
-        });
-
         let nullable = layout.dtype().is_nullable();
         let extra = nullable as usize;
 
@@ -98,17 +115,33 @@ impl StructReader {
         dtypes.extend(struct_dt.fields());
         names.extend(struct_dt.names().iter().map(|x| Arc::clone(x.inner())));
 
+        Ok(Self {
+            dtypes: dtypes.into(),
+            names: names.into(),
+            // Create an expanded root expression that contains all fields of the struct.
+            expanded_root_expr: expanded_struct_root(layout.dtype(), struct_dt)?,
+        })
+    }
+}
+
+impl StructReader {
+    pub(super) fn try_new(
+        layout: StructLayout,
+        name: Arc<str>,
+        segment_source: Arc<dyn SegmentSource>,
+        session: VortexSession,
+        ctx: crate::LayoutReaderContext,
+    ) -> VortexResult<Self> {
+        let fields = Arc::clone(layout.data().fields(&layout)?);
+
         let lazy_children = LazyReaderChildren::new(
             Arc::clone(layout.children()),
-            dtypes,
-            names,
+            Arc::clone(&fields.dtypes),
+            Arc::clone(&fields.names),
             Arc::clone(&segment_source),
             session.clone(),
             ctx,
         );
-
-        // Create an expanded root expression that contains all fields of the struct.
-        let expanded_root_expr = expanded_struct_root(layout.dtype(), struct_dt)?;
 
         // This is where we need to do some complex things with the scan in order to split it into
         // different scans for different fields.
@@ -116,9 +149,8 @@ impl StructReader {
             layout,
             name,
             session,
-            expanded_root_expr,
+            expanded_root_expr: fields.expanded_root_expr.clone(),
             lazy_children,
-            field_lookup,
             partitioned_expr_cache: Default::default(),
         })
     }
@@ -131,10 +163,8 @@ impl StructReader {
     /// Return the child reader for the field.
     fn field_reader(&self, name: &FieldName) -> VortexResult<&LayoutReaderRef> {
         let idx = self
-            .field_lookup
-            .as_ref()
-            .and_then(|lookup| lookup.get(name).copied())
-            .or_else(|| self.struct_fields().find(name))
+            .struct_fields()
+            .find(name)
             .ok_or_else(|| vortex_err!("Field {} not found in struct layout", name))?;
         self.field_reader_by_index(idx)
     }
@@ -576,9 +606,13 @@ mod tests {
     use vortex_io::session::RuntimeSessionExt;
     use vortex_mask::Mask;
 
+    use vortex_array::expr::ExactBoundExpr;
+
+    use super::StructReader;
     use crate::LayoutRef;
     use crate::LayoutStrategy;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
+    use crate::layouts::struct_::Struct;
     use crate::layouts::table::TableStrategy;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
@@ -760,6 +794,31 @@ mod tests {
         .unwrap();
 
         (segments, layout)
+    }
+
+    #[rstest]
+    fn test_readers_of_one_layout_share_field_state(
+        #[from(struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
+    ) {
+        let layout = layout.as_::<Struct>();
+        let reader = |name: &str| {
+            StructReader::try_new(
+                layout.clone(),
+                name.into(),
+                Arc::clone(&segments),
+                SESSION.clone(),
+                Default::default(),
+            )
+            .unwrap()
+        };
+        let first = reader("first");
+        let second = reader("second");
+
+        assert_eq!(
+            ExactBoundExpr(first.expanded_root_expr),
+            ExactBoundExpr(second.expanded_root_expr)
+        );
+        assert!(layout.data().clone().fields.get().is_none());
     }
 
     #[rstest]

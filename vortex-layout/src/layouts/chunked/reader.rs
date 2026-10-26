@@ -73,7 +73,7 @@ impl ChunkedReader {
             // access benchmarks
             let nchildren = layout.nchildren();
             let dtypes = vec![layout.dtype().clone(); nchildren];
-            let names = (0..nchildren)
+            let names: Vec<Arc<str>> = (0..nchildren)
                 .map(|idx| Arc::from(format!("{name}.[{idx}]")))
                 .collect();
             LazyReaderChildren::new(
