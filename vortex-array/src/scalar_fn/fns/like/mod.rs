@@ -547,14 +547,14 @@ mod tests {
 
     #[test]
     fn test_like_binary_byte_semantics() {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         // `Ж` (U+0416) encodes as bytes D0 96 (2 bytes); 0xFF is an invalid-UTF-8 byte.
         let rows: Vec<&[u8]> = vec![
-            b"aXb",                                  // a + 1 byte  + b
-            &[0x61, 0xD0, 0x96, 0x62],               // a + Ж (2 bytes) + b
-            &[0x61, 0xD0, 0x96, 0xD0, 0x96, 0x62],   // a + ЖЖ (4 bytes) + b
-            b"ab",                                   // a + 0 bytes + b
-            &[0x61, 0xFF, 0x62],                     // a + invalid-UTF-8 byte + b
+            b"aXb",                                // a + 1 byte  + b
+            &[0x61, 0xD0, 0x96, 0x62],             // a + Ж (2 bytes) + b
+            &[0x61, 0xD0, 0x96, 0xD0, 0x96, 0x62], // a + ЖЖ (4 bytes) + b
+            b"ab",                                 // a + 0 bytes + b
+            &[0x61, 0xFF, 0x62],                   // a + invalid-UTF-8 byte + b
         ];
         let array = VarBinViewArray::from_iter_bin(rows).into_array();
         assert!(array.dtype().is_binary());
@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn test_ilike_over_binary_is_rejected() {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let array = VarBinViewArray::from_iter_bin([b"abc".as_slice()]).into_array();
         // Case folding is only well-defined over text, so ILIKE over Binary must be rejected.
         let built = Like::try_new(
